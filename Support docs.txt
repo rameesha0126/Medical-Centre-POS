@@ -1,0 +1,70 @@
+/*
+$patientId = "7f747876-3eeb-4d59-9ea0-aaf49987b046"
+$doctorId = "f5d87aee-c565-41c7-98ab-f12d208d8c7f"
+69372031-6237-4543-8937-fad3074b15ad
+*/
+
+/**
+ * receptionist - wmc-reception@1234
+ */
+
+/**
+$username = Read-Host "Owner username"
+$securePassword = Read-Host "Owner password" -AsSecureString
+$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+
+try {
+    $password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+
+    $body = @{
+        username = $username
+        password = $password
+    } | ConvertTo-Json
+
+    $login = Invoke-RestMethod `
+        -Uri "http://localhost:3000/api/auth/login" `
+        -Method Post `
+        -ContentType "application/json" `
+        -Body $body `
+        -SessionVariable session
+
+    $login.user
+}
+finally {
+    if ($pointer -ne [IntPtr]::Zero) {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+    }
+
+    $password = $null
+    $body = $null
+    $securePassword.Dispose()
+}
+ */
+
+/**
+$staffSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
+$body = @{
+    username = "receptionist"
+    password = "wmc-reception@1234"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Uri "http://localhost:3000/api/auth/login" `
+    -Method POST `
+    -ContentType "application/json" `
+    -WebSession $staffSession `
+    -Body $body
+ */
+
+/**
+One patient ID. - "1a6089dc-dc9f-4598-893b-e748b45350b8"
+One procedure service ID. - "76944d0b-7775-400b-b90e-0b0371969190"
+One laboratory service ID. - "59182927-7d10-47e9-b0a3-0bd11489ca31"
+One consultation service ID. - "520f01a1-875c-4134-9172-a4788371673d"
+One doctor ID and their consultation fee. - "f5d87aee-c565-41c7-98ab-f12d208d8c7f", 200000
+One lab provider and its configured percentage. - "69372031-6237-4543-8937-fad3074b15ad", 70000
+ */
+
+Patient: 1a6089dc-dc9f-4598-893b-e748b45350b8
+Phone: 0771234567
