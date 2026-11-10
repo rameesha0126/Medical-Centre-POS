@@ -1081,4 +1081,135 @@ router.patch(
   },
 );
 
+router.get("/:id/settlement-preview", requireAuth, (req, res) => {
+  const parsed = uuidSchema.safeParse(req.params.id);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid doctor session ID." });
+    return;
+  }
+
+  const session = db.prepare(`
+    SELECT id, doctor_id, session_date, status
+    FROM doctor_sessions
+    WHERE id = ?
+  `).get(parsed.data) as {
+    id: string;
+    doctor_id: string;
+    session_date: string;
+    status: string;
+  } | undefined;
+
+  if (!session) {
+    res.status(404).json({ error: "Doctor session not found." });
+    return;
+  }
+
+  if (session.status !== "COMPLETED") {
+    res.status(409).json({
+      error: "Only completed doctor sessions can be previewed for settlement.",
+    });
+    return;
+  }
+
+  const rows = db.prepare(`
+    SELECT
+      a.id AS appointment_id,
+      a.queue_number,
+      i.id AS invoice_id,
+      i.invoice_number,
+      ii.id AS invoice_item_id,
+      ii.provider_share_minor AS doctor_fee_minor,
+      psi.settlement_id,
+      psi.amount_minor AS settled_amount_minor,
+      COALESCE((
+        SELECT SUM(rpa.provider_reduction_minor)
+        FROM payments p
+        JOIN refunds r ON r.payment_id = p.id
+        JOIN refund_provider_allocations rpa
+          ON rpa.refund_id = r.id AND rpa.invoice_item_id = ii.id
+        WHERE p.invoice_id = i.id AND p.status = 'CONFIRMED'
+      ), 0) AS provider_reduction_minor,
+      (
+        SELECT COUNT(*)
+        FROM payments p
+        JOIN refunds r ON r.payment_id = p.id
+        LEFT JOIN refund_provider_allocations rpa
+          ON rpa.refund_id = r.id AND rpa.invoice_item_id = ii.id
+        WHERE p.invoice_id = i.id AND p.status = 'CONFIRMED'
+          AND rpa.id IS NULL AND ii.provider_share_minor > 0
+      ) AS unresolved_refund_count
+    FROM appointments a
+    JOIN invoices i ON i.appointment_id = a.id
+    JOIN invoice_items ii ON ii.invoice_id = i.id AND ii.doctor_id = a.doctor_id
+    JOIN services s ON s.id = ii.service_id AND s.service_type = 'CONSULTATION'
+    LEFT JOIN provider_settlement_items psi ON psi.invoice_item_id = ii.id
+    WHERE a.doctor_session_id = ?
+      AND a.status = 'COMPLETED'
+      AND (
+        i.status IN ('PAID', 'REFUNDED')
+        OR (
+          i.status = 'OPEN'
+          AND (
+            SELECT COALESCE(SUM(p.amount_minor), 0)
+            FROM payments p
+            WHERE p.invoice_id = i.id
+              AND p.status = 'CONFIRMED'
+          ) >= i.total_minor
+        )
+      )
+    ORDER BY a.queue_number, ii.id
+  `).all(session.id) as Array<{
+    appointment_id: string;
+    queue_number: number;
+    invoice_id: string;
+    invoice_number: string;
+    invoice_item_id: string;
+    doctor_fee_minor: number;
+    settlement_id: string | null;
+    settled_amount_minor: number | null;
+    provider_reduction_minor: number;
+    unresolved_refund_count: number;
+  }>;
+
+  const items = rows.map((row) => ({
+    ...row,
+    entitlement_minor: row.doctor_fee_minor - row.provider_reduction_minor,
+  }));
+
+  const unlinkedAppointments = db.prepare(`
+    SELECT id, queue_number, status
+    FROM appointments
+    WHERE doctor_id = ?
+      AND appointment_date = ?
+      AND doctor_session_id IS NULL
+      AND status NOT IN ('CANCELLED', 'NO_SHOW')
+    ORDER BY queue_number
+  `).all(session.doctor_id, session.session_date);
+
+  const unsettledItems = items.filter((item) => item.settlement_id === null);
+  const alreadySettledItems = items.filter((item) => item.settlement_id !== null);
+  const unresolvedRefundItems = items.filter(
+    (item) => item.unresolved_refund_count > 0,
+  );
+  const unsettledEntitlementMinor = unsettledItems.reduce(
+    (total, item) => total + item.entitlement_minor,
+    0,
+  );
+  const reviewRequired =
+    unlinkedAppointments.length > 0 || unresolvedRefundItems.length > 0;
+
+  res.json({
+    session,
+    unsettled_items: unsettledItems,
+    already_settled_items: alreadySettledItems,
+    unsettled_entitlement_minor: unsettledEntitlementMinor,
+    unlinked_appointments: unlinkedAppointments,
+    unresolved_refund_item_ids: unresolvedRefundItems.map(
+      (item) => item.invoice_item_id,
+    ),
+    review_required: reviewRequired,
+    ready_for_payout: !reviewRequired && unsettledEntitlementMinor > 0,
+  });
+});
+
 export default router;
