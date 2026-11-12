@@ -1,0 +1,1 @@
+{"version":3,"file":"security.d.ts","sourceRoot":"","sources":["../../src/auth/security.ts"],"names":[],"mappings":"AAiCA,wBAAsB,YAAY,CAChC,QAAQ,EAAE,MAAM,GACf,OAAO,CAAC,MAAM,CAAC,CAYjB;AAED,wBAAsB,cAAc,CAClC,QAAQ,EAAE,MAAM,EAChB,UAAU,EAAE,MAAM,GACjB,OAAO,CAAC,OAAO,CAAC,CAgDlB;AAED,wBAAgB,kBAAkB,IAAI,MAAM,CAE3C;AAED,wBAAgB,gBAAgB,CAAC,KAAK,EAAE,MAAM,GAAG,MAAM,CAEtD"}

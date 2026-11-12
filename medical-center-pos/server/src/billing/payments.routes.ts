@@ -512,6 +512,8 @@ router.post(
             error: "An explicit allocation (including zero) is required for every provider-share item." };
         }
 
+        const paidDoctorSettlementsByItem = new Map<string, string>();
+
         let totalProviderReduction = 0;
         for (const allocation of data.provider_allocations) {
           const item = itemMap.get(allocation.invoice_item_id);
@@ -535,12 +537,30 @@ router.post(
               error: "Provider reduction exceeds the remaining provider entitlement." };
           }
           if (allocation.provider_reduction_minor > 0) {
-            const settled = db.prepare(`
-              SELECT 1 FROM provider_settlement_items WHERE invoice_item_id = ? LIMIT 1
-            `).get(item.id);
-            if (settled) {
-              return { success: false as const, status: 409,
-                error: "Provider-share adjustments for settled items are not enabled yet." };
+            const linkedSettlement = db.prepare(`
+              SELECT ps.id, ps.provider_type, ps.status
+              FROM provider_settlement_items psi
+              JOIN provider_settlements ps ON ps.id = psi.settlement_id
+              WHERE psi.invoice_item_id = ?
+            `).get(item.id) as {
+              id: string;
+              provider_type: string;
+              status: string;
+            } | undefined;
+
+            if (linkedSettlement) {
+              if (
+                linkedSettlement.provider_type !== "DOCTOR" ||
+                linkedSettlement.status !== "PAID"
+              ) {
+                return {
+                  success: false as const,
+                  status: 409,
+                  error: "Provider-share adjustments for this settlement are not enabled yet.",
+                };
+              }
+
+              paidDoctorSettlementsByItem.set(item.id, linkedSettlement.id);
             }
           }
           totalProviderReduction += allocation.provider_reduction_minor;
@@ -597,11 +617,42 @@ router.post(
             id, refund_id, invoice_item_id, provider_reduction_minor, created_by
           ) VALUES (?, ?, ?, ?, ?)
         `);
+        const insertAdjustment = db.prepare(`
+          INSERT INTO provider_settlement_adjustments (
+            id,
+            settlement_id,
+            refund_provider_allocation_id,
+            adjustment_minor,
+            status,
+            created_by
+          )
+          VALUES (?, ?, ?, ?, 'PENDING', ?)
+        `);
+
         for (const allocation of data.provider_allocations) {
+          const allocationId = randomUUID();
+
           insertAllocation.run(
-            randomUUID(), refundId, allocation.invoice_item_id,
-            allocation.provider_reduction_minor, user.id
+            allocationId,
+            refundId,
+            allocation.invoice_item_id,
+            allocation.provider_reduction_minor,
+            user.id,
           );
+
+          const settlementId = paidDoctorSettlementsByItem.get(
+            allocation.invoice_item_id,
+          );
+
+          if (settlementId) {
+            insertAdjustment.run(
+              randomUUID(),
+              settlementId,
+              allocationId,
+              allocation.provider_reduction_minor,
+              user.id,
+            );
+          }
         }
 
         const totals = db.prepare(`

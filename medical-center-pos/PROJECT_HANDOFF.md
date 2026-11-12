@@ -29,12 +29,99 @@ The old thread referred to a generic settlement route and an implemented lab set
 - Staff choose the provider impact of a refund per invoice item. An explicit zero means the centre absorbs the refund. The API currently requires an allocation for every provider-share item on the invoice.
 - Preserve existing payout records and the original settled amounts. A later positive provider reduction belongs in a separate auditable adjustment linked to the original settlement and refund allocation. The current API returns HTTP 409 for positive reductions on already-settled items.
 
+## Doctor settlements checkpoint — 2026-11-12
+
+Implemented through Step 4F.29. Results below were reported by the
+user from TypeScript builds, Postman requests, and SQLite queries.
+
+### Source files
+
+- server/src/doctor-sessions/doctor-sessions.routes.ts
+- server/src/billing/payments.routes.ts
+- server/migrations/007_provider_adjustment_recoveries.sql
+- server/migrations/008_settlement_recovery_amount.sql
+
+### Implemented endpoints
+
+All paths below are relative to /api/doctor-sessions and require
+authentication.
+
+- GET /:id/settlement-preview
+- POST /:id/payouts
+- GET /doctors/:doctorId/adjustment-balance
+- POST /doctors/:doctorId/adjustment-repayments
+- GET /doctors/:doctorId/adjustment-recoveries
+
+The payout request requires request_key, method BANK_TRANSFER,
+reference, and expected_amount_minor. Optional deductions identify
+adjustments and the amounts to recover.
+
+expected_amount_minor means gross entitlement being settled.
+Actual payment equals gross entitlement minus deductions.
+A settlement fully covered by deductions returns payout: null.
+
+### Confirmed rules
+
+- Staff manually allocate each refund's provider impact per invoice
+  item. An explicit zero means the centre absorbs that impact.
+- Missing provider allocations block settlement readiness.
+- Refunds against fully paid doctor settlements create separate
+  PENDING adjustments for positive provider reductions.
+- Original settled amounts and payout history are preserved.
+- Staff can recover adjustments through separate repayments,
+  deductions from later settlements, or a combination.
+- Partial recovery carries the remaining balance forward for the
+  same doctor. Full recovery marks the adjustment APPLIED.
+- Repayment and settlement request keys support exact retries.
+- Settlement and recovery writes use SQLite transactions.
+
+### Reported passing checks
+
+- TypeScript builds.
+- Completed-session preview and active-session rejection.
+- Invalid session/doctor IDs and signed-out preview rejection.
+- Explicit zero and positive refund allocations.
+- Partially refunded invoices remain eligible for preview.
+- Missing allocation blocks payout readiness.
+- Already-settled items are excluded from unsettled entitlement.
+- Same-day sessions isolate their invoice items.
+- Bank payout, stale-amount rejection, and repeat-payment rejection.
+- Persisted settlement, payout, item link, and payout audit.
+- Post-payout refund adjustment with original payout preserved.
+- Partial bank repayment, exact retry, changed-key-payload rejection,
+  and excessive repayment rejection.
+- Full deduction with zero actual payment and carry-forward.
+- Partial deduction with a positive bank payment.
+- Exact settlement retries return the same settlement/payout IDs.
+- Recovery history contains three events totaling 5000 minor units,
+  with matching event and allocation amounts.
+
+### Test environment
+
+Later adjustment and recovery checks ran against:
+D:\Medical Centre POS\server-post-payout-test\data\medical-center.sqlite
+
+Disposable fixtures include completed sessions seeded directly
+in SQLite. They bypass scheduling and consultation workflow checks.
+
+A test payout with reference TEST-4F16-001 was recorded in the
+primary project database before the later disposable-copy tests.
+
+Applied migrations 007 and 008 were confirmed in the disposable
+copy. Their application to the primary database remains unverified.
+
+### Remaining work
+
+- Cash and QR doctor payouts and repayments.
+- Cash drawer and report integration for provider money movements.
+- Settlement history/details suitable for the frontend.
+- Provider Settlements frontend workflows.
+- Lab settlement and recovery workflows.
+- Broader rejection and concurrent-request tests.
+
 ## Next task
 
-Implement an authenticated, read-only `GET /api/doctor-sessions/:id/settlement-preview` for completed sessions in the existing doctor-session router.
-
-1. Follow the exact session ID through completed appointments to their consultation invoice items. Show each stored doctor fee, the sum of explicit provider reductions, and the resulting entitlement.
-2. Show already-linked items separately and exclude them from the amount available to settle. Flag unlinked appointments for the same doctor and date and historical refunds with unresolved provider impact. Treat those review flags as blockers for payout readiness.
-3. Verify with disposable data covering no refund, explicit zero, positive reduction, a previously settled item, an unresolved historical refund, an active session, and another session for the same doctor on the same day.
-
-After each milestone, update the code references, record the checks actually run, and replace the next task with the next unfinished step.
+Inspect the current cash-session routes, provider payout schema,
+and cash-report calculations before adding cash doctor payouts.
+Account for outgoing payouts and incoming doctor repayments in
+drawer totals and daily reports.
