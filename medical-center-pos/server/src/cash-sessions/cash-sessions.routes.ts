@@ -30,6 +30,8 @@ type CashSessionRow = {
 type CashTotals = {
   cash_received_minor: number;
   cash_refunded_minor: number;
+  cash_provider_paid_minor: number;
+  cash_provider_repaid_minor: number;
 };
 
 const openSessionSchema = z.object({
@@ -76,8 +78,23 @@ function getCashTotals(sessionId: string): CashTotals {
         FROM refunds
         WHERE cash_session_id = ?
           AND refund_method = 'CASH'
-      ), 0) AS cash_refunded_minor
-  `).get(sessionId, sessionId) as CashTotals;
+      ), 0) AS cash_refunded_minor,
+
+      COALESCE((
+        SELECT SUM(amount_minor)
+        FROM provider_payouts
+        WHERE cash_session_id = ?
+          AND method = 'CASH'
+      ), 0) AS cash_provider_paid_minor,
+
+      COALESCE((
+        SELECT SUM(amount_minor)
+        FROM provider_adjustment_recoveries
+        WHERE cash_session_id = ?
+          AND recovery_kind = 'REPAYMENT'
+          AND repayment_method = 'CASH'
+      ), 0) AS cash_provider_repaid_minor
+  `).get(sessionId, sessionId, sessionId, sessionId) as CashTotals;
 }
 
 function getSessionSummary(sessionId: string) {
@@ -90,7 +107,9 @@ function getSessionSummary(sessionId: string) {
   const expectedCash =
     session.opening_float_minor +
     totals.cash_received_minor -
-    totals.cash_refunded_minor;
+    totals.cash_refunded_minor +
+    totals.cash_provider_repaid_minor -
+    totals.cash_provider_paid_minor;
 
   return {
     session,
@@ -98,6 +117,8 @@ function getSessionSummary(sessionId: string) {
       opening_float_minor: session.opening_float_minor,
       cash_received_minor: totals.cash_received_minor,
       cash_refunded_minor: totals.cash_refunded_minor,
+      cash_provider_paid_minor: totals.cash_provider_paid_minor,
+      cash_provider_repaid_minor: totals.cash_provider_repaid_minor,
       expected_cash_minor: expectedCash,
       counted_cash_minor: session.counted_cash_minor,
       difference_minor: session.difference_minor,
@@ -326,7 +347,9 @@ router.post("/:id/close", requireAuth, (req, res) => {
       const expectedCash =
         session.opening_float_minor +
         totals.cash_received_minor -
-        totals.cash_refunded_minor;
+        totals.cash_refunded_minor +
+        totals.cash_provider_repaid_minor -
+        totals.cash_provider_paid_minor;
 
       const countedCash = parsed.data.counted_cash_minor;
       const difference = countedCash - expectedCash;
@@ -368,6 +391,8 @@ router.post("/:id/close", requireAuth, (req, res) => {
           difference_minor: difference,
           cash_received_minor: totals.cash_received_minor,
           cash_refunded_minor: totals.cash_refunded_minor,
+          cash_provider_paid_minor: totals.cash_provider_paid_minor,
+          cash_provider_repaid_minor: totals.cash_provider_repaid_minor,
         }),
       );
 

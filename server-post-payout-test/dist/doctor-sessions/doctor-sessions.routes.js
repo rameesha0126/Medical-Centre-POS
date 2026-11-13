@@ -852,7 +852,7 @@ router.get("/:id/settlement-preview", requireAuth, (req, res) => {
 });
 const doctorPayoutSchema = z.object({
     request_key: uuidSchema,
-    method: z.literal("BANK_TRANSFER"),
+    method: z.enum(["CASH", "BANK_TRANSFER", "QR"]),
     reference: z.string().trim().min(1).max(200),
     expected_amount_minor: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     deductions: z.array(z.object({
@@ -980,6 +980,23 @@ router.post("/:id/payouts", requireAuth, (req, res) => {
             const settlementId = randomUUID();
             const paymentAmount = grossAmount - recoveredAmount;
             const { session } = preview;
+            let cashSessionId = null;
+            if (input.method === "CASH" && paymentAmount > 0) {
+                const cashSession = db.prepare(`
+          SELECT id
+          FROM cash_sessions
+          WHERE status = 'OPEN'
+          LIMIT 1
+        `).get();
+                if (!cashSession) {
+                    return {
+                        ok: false,
+                        status: 409,
+                        error: "A cash session must be open before paying a doctor in cash.",
+                    };
+                }
+                cashSessionId = cashSession.id;
+            }
             db.prepare(`
         INSERT INTO provider_settlements (
           id, provider_type, doctor_id, period_start, period_end,
@@ -1045,13 +1062,15 @@ router.post("/:id/payouts", requireAuth, (req, res) => {
                     amount_minor: paymentAmount,
                     method: input.method,
                     reference: input.reference,
+                    cash_session_id: cashSessionId,
                 };
                 db.prepare(`
           INSERT INTO provider_payouts (
-            id, settlement_id, amount_minor, method, reference, paid_by
+            id, settlement_id, amount_minor, method, reference,
+            paid_by, cash_session_id
           )
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(payout.id, settlementId, payout.amount_minor, payout.method, payout.reference, user.id);
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(payout.id, settlementId, payout.amount_minor, payout.method, payout.reference, user.id, cashSessionId);
                 insertAudit.run(user.id, "PROVIDER_PAYOUT", payout.id, JSON.stringify({
                     doctor_session_id: session.id,
                     settlement_id: settlementId,
@@ -1059,6 +1078,7 @@ router.post("/:id/payouts", requireAuth, (req, res) => {
                     method: payout.method,
                     reference: payout.reference,
                     invoice_item_ids: items.map((item) => item.invoice_item_id),
+                    cash_session_id: cashSessionId,
                 }));
             }
             const settlement = {
@@ -1141,7 +1161,7 @@ const adjustmentRepaymentSchema = z.object({
     request_key: z.string().uuid(),
     adjustment_id: z.string().uuid(),
     amount_minor: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    method: z.literal("BANK_TRANSFER"),
+    method: z.enum(["CASH", "BANK_TRANSFER", "QR"]),
     reference: z.string().trim().min(1).max(200),
 }).strict();
 router.post("/doctors/:doctorId/adjustment-repayments", requireAuth, (req, res) => {
@@ -1157,7 +1177,7 @@ router.post("/doctors/:doctorId/adjustment-repayments", requireAuth, (req, res) 
         const existing = db.prepare(`
         SELECT
           id, doctor_id, recovery_kind, amount_minor,
-          repayment_method, reference
+          repayment_method, reference, cash_session_id
         FROM provider_adjustment_recoveries
         WHERE request_key = ?
       `).get(input.request_key);
@@ -1187,6 +1207,7 @@ router.post("/doctors/:doctorId/adjustment-repayments", requireAuth, (req, res) 
                 ok: true,
                 replayed: true,
                 recoveryId: existing.id,
+                cashSessionId: existing.cash_session_id,
             };
         }
         const adjustment = db.prepare(`
@@ -1220,14 +1241,32 @@ router.post("/doctors/:doctorId/adjustment-repayments", requireAuth, (req, res) 
                 error: "The adjustment is not pending or the repayment exceeds its remaining balance.",
             };
         }
+        let cashSessionId = null;
+        if (input.method === "CASH") {
+            const cashSession = db.prepare(`
+          SELECT id
+          FROM cash_sessions
+          WHERE status = 'OPEN'
+          LIMIT 1
+        `).get();
+            if (!cashSession) {
+                return {
+                    ok: false,
+                    status: 409,
+                    error: "A cash session must be open before accepting a doctor repayment in cash.",
+                };
+            }
+            cashSessionId = cashSession.id;
+        }
         const recoveryId = randomUUID();
         db.prepare(`
         INSERT INTO provider_adjustment_recoveries (
           id, request_key, doctor_id, recovery_kind,
-          amount_minor, repayment_method, reference, created_by
+          amount_minor, repayment_method, reference,
+          cash_session_id, created_by
         )
-        VALUES (?, ?, ?, 'REPAYMENT', ?, ?, ?, ?)
-      `).run(recoveryId, input.request_key, doctorId.data, input.amount_minor, input.method, input.reference, user.id);
+        VALUES (?, ?, ?, 'REPAYMENT', ?, ?, ?, ?, ?)
+      `).run(recoveryId, input.request_key, doctorId.data, input.amount_minor, input.method, input.reference, cashSessionId, user.id);
         db.prepare(`
         INSERT INTO provider_adjustment_recovery_items (
           id, recovery_id, adjustment_id, amount_minor
@@ -1250,11 +1289,13 @@ router.post("/doctors/:doctorId/adjustment-repayments", requireAuth, (req, res) 
             doctor_id: doctorId.data,
             recovery_kind: "REPAYMENT",
             ...input,
+            cash_session_id: cashSessionId,
         }));
         return {
             ok: true,
             replayed: false,
             recoveryId,
+            cashSessionId,
         };
     });
     const result = recordRepayment.immediate();
@@ -1267,6 +1308,7 @@ router.post("/doctors/:doctorId/adjustment-repayments", requireAuth, (req, res) 
             id: result.recoveryId,
             doctor_id: doctorId.data,
             ...input,
+            cash_session_id: result.cashSessionId,
         },
         replayed: result.replayed,
     });
